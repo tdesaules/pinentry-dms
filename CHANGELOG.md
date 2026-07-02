@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-02
+
+### Changed
+- First stable release. The Assuan pinentry protocol surface, the
+  binary ↔ plugin JSON IPC contract, and the GnuPG/mise integration
+  model (`pinentry-program` in `~/.gnupg/gpg-agent.conf` pointing at the
+  mise `pinentry-dms` shim) are now considered stable.
+
 ## [0.3.0] - 2026-07-02
 
 ### Changed
