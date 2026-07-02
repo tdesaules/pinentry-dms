@@ -86,7 +86,9 @@ gopass age agent status
 
 The `gopass-age-agent.service` user systemd unit is **locked at boot**
 (`ExecStartPost lock`); the first gopass op of the session is the canonical
-trigger for the modal.
+trigger for the modal. The unit's PATH only contains mise's shims, so the
+integration must expose the binary as `pinentry` within mise's shims (see
+"Integration" below) — the service itself needs no change.
 
 ## Integration (chez-moi repo, separate)
 
