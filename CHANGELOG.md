@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-02
+
+### Changed
+- Release artifacts split: raw Rust binaries (`pinentry-dms-<version>-<target>`,
+  no tar.gz) per arch + a single `pinentry-dms-plugin-<version>.tar.gz`
+  containing only the DMS plugin files, for simpler deployment.
+
 ## [0.2.0] - 2026-07-02
 
 ### Changed

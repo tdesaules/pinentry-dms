@@ -1,6 +1,6 @@
 [package]
 name = "pinentry-dms"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "DankMaterialShell-styled pinentry for gopass + age"
 license = "GPL-3.0-only"

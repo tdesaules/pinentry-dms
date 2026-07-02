@@ -91,9 +91,10 @@ workflow itself change. Jobs:
 - `lint-commits` (PR only): Conventional Commits format.
 - `check`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build`,
   `cargo test`.
-- `build`: matrix x86_64 + aarch64 release build; packages a `tar.gz`
-  (containing `bin/pinentry-dms` + `plugin/` + docs) + `sha256`, uploads as
- artifact (runs on PRs too, to validate cross-builds).
+- `build`: matrix x86_64 + aarch64 release build; uploads the **raw binary**
+  `pinentry-dms-<version>-<target>` (+ `.sha256`) — no tar.gz around the binary.
+- `package-plugin`: creates a single `pinentry-dms-plugin-<version>.tar.gz`
+  containing only the DMS plugin files (`plugin/`), + `.sha256`.
 - `detect-release` (push to `main` only, after `check`+`build`): reads
   `Cargo.toml` version, asserts strict semver and parity with `plugin.json`,
   and checks whether tag `v<version>` already exists on the remote.

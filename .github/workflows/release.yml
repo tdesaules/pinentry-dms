@@ -58,7 +58,7 @@ jobs:
       - run: cargo test --locked
 
   build:
-    name: Build + package (${{ matrix.target }})
+    name: Build binary (${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -84,32 +84,50 @@ jobs:
         run: |
           test -x "target/${{ matrix.target }}/release/pinentry-dms"
           file "target/${{ matrix.target }}/release/pinentry-dms"
-      - name: Package (binary + DMS plugin + docs)
-        id: pkg
+      - name: Stage raw binary + sha256 (no archive)
         run: |
           arch=${{ matrix.target }}
           version=$(grep -m1 '^version = "' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
-          staging="pinentry-dms-${version}-${arch}"
-          mkdir -p "${staging}/bin" "${staging}/plugin"
-          cp "target/${arch}/release/pinentry-dms" "${staging}/bin/"
-          cp -r plugin/. "${staging}/plugin/"
-          cp README.md CHANGELOG.md LICENSE Cargo.toml "${staging}/"
-          tar -C "${staging}" -czf "pinentry-dms-${version}-${arch}.tar.gz" .
-          sha256sum "pinentry-dms-${version}-${arch}.tar.gz" > "pinentry-dms-${version}-${arch}.tar.gz.sha256"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "--- archive contents ---"
-          tar -tzf "pinentry-dms-${version}-${arch}.tar.gz"
+          out="pinentry-dms-${version}-${arch}"
+          cp "target/${arch}/release/pinentry-dms" "${out}"
+          chmod +x "${out}"
+          sha256sum "${out}" > "${out}.sha256"
+          echo "--- staged binary ---"
+          ls -la "${out}" "${out}.sha256"
+          file "${out}"
       - uses: actions/upload-artifact@v4
         with:
           name: pinentry-dms-${{ matrix.target }}
           path: |
-            pinentry-dms-*-${{ matrix.target }}.tar.gz
-            pinentry-dms-*-${{ matrix.target }}.tar.gz.sha256
+            pinentry-dms-*-${{ matrix.target }}
+            pinentry-dms-*-${{ matrix.target }}.sha256
+
+  package-plugin:
+    name: Package DMS plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create plugin tar.gz (plugin/ only)
+        run: |
+          version=$(grep -m1 '^version = "' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          out="pinentry-dms-plugin-${version}.tar.gz"
+          tar -C plugin -czf "${out}" .
+          sha256sum "${out}" > "${out}.sha256"
+          echo "--- plugin archive contents ---"
+          tar -tzf "${out}"
+          echo "--- staged ---"
+          ls -la "${out}" "${out}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pinentry-dms-plugin
+          path: |
+            pinentry-dms-plugin-*.tar.gz
+            pinentry-dms-plugin-*.tar.gz.sha256
 
   detect-release:
     name: Detect version bump
     runs-on: ubuntu-latest
-    needs: [check, build]
+    needs: [check, build, package-plugin]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
@@ -164,17 +182,26 @@ jobs:
           echo "--- dist/ contents ---"
           ls -la dist/
           version="${{ needs.detect-release.outputs.version }}"
+          # 2 raw binaries + their sha256
           for arch in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
-            tgz="dist/pinentry-dms-*-${arch}.tar.gz"
-            if ! ls $tgz >/dev/null 2>&1; then
-              echo "::error::missing tarball for ${arch}"; exit 1
+            bin="dist/pinentry-dms-*-${arch}"
+            if ! ls $bin >/dev/null 2>&1; then
+              echo "::error::missing binary for ${arch}"; exit 1
             fi
-            sha="${tgz}.sha256"
-            if ! ls $sha >/dev/null 2>&1; then
+            if ! ls ${bin}.sha256 >/dev/null 2>&1; then
               echo "::error::missing sha256 for ${arch}"; exit 1
             fi
           done
+          # 1 plugin tar.gz + its sha256
+          if ! ls dist/pinentry-dms-plugin-*.tar.gz >/dev/null 2>&1; then
+            echo "::error::missing plugin tar.gz"; exit 1
+          fi
+          if ! ls dist/pinentry-dms-plugin-*.tar.gz.sha256 >/dev/null 2>&1; then
+            echo "::error::missing plugin tar.gz sha256"; exit 1
+          fi
           echo "all release assets present for v${version}"
+          echo "--- binary types ---"
+          file dist/pinentry-dms-* 2>/dev/null || true
       - name: Build changelog body (matching version section)
         run: |
           version="${{ needs.detect-release.outputs.version }}"
@@ -201,6 +228,10 @@ jobs:
           name: v${{ needs.detect-release.outputs.version }}
           body_path: /tmp/release-body.md
           files: |
-            dist/pinentry-dms-*.tar.gz
-            dist/pinentry-dms-*.tar.gz.sha256
+            dist/pinentry-dms-*-x86_64-unknown-linux-gnu
+            dist/pinentry-dms-*-x86_64-unknown-linux-gnu.sha256
+            dist/pinentry-dms-*-aarch64-unknown-linux-gnu
+            dist/pinentry-dms-*-aarch64-unknown-linux-gnu.sha256
+            dist/pinentry-dms-plugin-*.tar.gz
+            dist/pinentry-dms-plugin-*.tar.gz.sha256
           fail_on_unmatched_files: true
