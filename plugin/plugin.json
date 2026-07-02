@@ -1,0 +1,18 @@
+{
+    "id": "pinentryDms",
+    "name": "Pinentry DMS",
+    "description": "gopass/age passphrase entry with a native DMS modal (pinentry-dms binary)",
+    "version": "0.1.0",
+    "author": "tdesaules",
+    "type": "daemon",
+    "capabilities": ["authentication", "ipc", "daemon"],
+    "component": "./PinentryDaemon.qml",
+    "icon": "vpn_key",
+    "permissions": [
+        "process"
+    ],
+    "requires": [
+        "pinentry-dms"
+    ],
+    "requires_dms": ">=1.4.0"
+}

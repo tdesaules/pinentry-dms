@@ -1,0 +1,25 @@
+[package]
+name = "pinentry-dms"
+version = "0.1.0"
+edition = "2021"
+description = "DankMaterialShell-styled pinentry for gopass + age"
+license = "GPL-3.0-only"
+authors = ["tdesaules"]
+repository = "https://github.com/tdesaules/pinentry-dms"
+keywords = ["pinentry", "gopass", "age", "dankmaterialshell"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "pinentry-dms"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
