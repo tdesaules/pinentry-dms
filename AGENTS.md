@@ -68,11 +68,29 @@ Settings live at `~/.config/DankMaterialShell/plugin_settings.json`; enable
 
 ## Versioning & release
 
-- Semver. Bump both `Cargo.toml` `version` **and** `plugin/plugin.json`
-  `"version"` together, and add a `CHANGELOG.md` entry.
-- Tagging `v*` triggers `.github/workflows/release.yml`, which builds
-  `x86_64-unknown-linux-gnu` + `aarch64-unknown-linux-gnu` tarballs and
-  publishes a GitHub release. Consumers install via mise:
+- **Strict semver** for all releases: tags must match `vX.Y.Z` (no pre/build
+  suffixes); the `validate-tag` job in `release.yml` enforces this.
+- **Conventional Commits** are enforced on pull requests by `ci.yml`:
+  `<type>(<scope>)?!?: <description>` with types
+  `feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert`.
+- Bump **both** `Cargo.toml` `version` **and** `plugin/plugin.json`
+  `"version"` together; bump `version =` in both; add a `## [x.y.z]` section
+  to `CHANGELOG.md` describing the changes.
+- To cut a release: commit the version bump, then`git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+## CI
+
+- `.github/workflows/ci.yml` — runs on push to `main` and on PRs when files
+  under `src/`, `plugin/`, `Cargo.toml`, `Cargo.lock`, or the workflow files
+  change. Jobs: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build`,
+  `cargo test`, smoke cross-builds (x86_64 + aarch64), and Conventional
+  Commits lint on PRs.
+- `.github/workflows/release.yml` — runs only on `v*` tags. Validates semver,
+  builds `x86_64-unknown-linux-gnu` + `aarch64-unknown-linux-gnu`, packages a
+  `tar.gz` containing `bin/pinentry-dms` + `plugin/` (the DMS plugin) + docs,
+  attaches `sha256`, and publishes the GitHub release with the matching
+  `CHANGELOG.md` section as body.
+- Consumers install via mise:
   `"github:tdesaules/pinentry-dms" = "latest"` in `dot_config/mise/config.toml.tmpl`.
 
 ## End-to-end test (on target host)

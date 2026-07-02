@@ -61,9 +61,8 @@ fn eq_int_zero(v: &i32) -> bool {
 /// Pick a unique socket path under `XDG_RUNTIME_DIR` (falling back to a user
 /// tmp dir), with an 8-byte random suffix like the Go reference.
 pub fn socket_path() -> PathBuf {
-    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
-        format!("/tmp/dms-pinentry-{}", nix_uid())
-    });
+    let dir = std::env::var("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|_| format!("/tmp/dms-pinentry-{}", nix_uid()));
     let id = random_hex8();
     PathBuf::from(dir).join(format!("dms-pinentry-{}.sock", id))
 }
@@ -146,8 +145,8 @@ fn run_dialog(
         timeout: state.timeout,
         repeat: state.repeat,
     };
-    let req_json = serde_json::to_string(&req)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("marshal: {e}")))?;
+    let req_json =
+        serde_json::to_string(&req).map_err(|e| io::Error::other(format!("marshal: {e}")))?;
 
     // Fire off the IPC command detached: the Go reference does not wait for it.
     let _child = Command::new("dms")
@@ -167,8 +166,7 @@ fn accept_and_read(listener: &UnixListener, state: &crate::assuan::State) -> io:
     const ACCEPT_BUFFER: Duration = Duration::from_secs(10);
     let mut accept_deadline = Duration::from_secs(60);
     if state.timeout > 0 {
-        accept_deadline =
-            Duration::from_secs(state.timeout as u64).saturating_add(ACCEPT_BUFFER);
+        accept_deadline = Duration::from_secs(state.timeout as u64).saturating_add(ACCEPT_BUFFER);
     }
 
     let conn = poll_accept(listener, accept_deadline)?;
@@ -235,6 +233,5 @@ fn poll_read_line(mut conn: UnixStream, deadline: Duration) -> io::Result<Respon
         buf.pop();
     }
 
-    serde_json::from_slice::<Response>(&buf)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("decode: {e}")))
+    serde_json::from_slice::<Response>(&buf).map_err(|e| io::Error::other(format!("decode: {e}")))
 }

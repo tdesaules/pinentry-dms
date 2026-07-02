@@ -191,9 +191,8 @@ fn parse_args() -> Args {
                 }
             }
             // Standard pinentry compatibility flags (accepted, ignored).
-            "--display" | "-D" | "--ttyname" | "-T" | "--ttytype" | "-N"
-            | "--lc-ctype" | "-C" | "--lc-messages" | "-M" | "--colors"
-            | "--xauthority" => {
+            "--display" | "-D" | "--ttyname" | "-T" | "--ttytype" | "-N" | "--lc-ctype" | "-C"
+            | "--lc-messages" | "-M" | "--colors" | "--xauthority" => {
                 i += 1; // swallow the value
             }
             "--parent-wid" | "-W" => {

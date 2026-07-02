@@ -1,0 +1,93 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'plugin/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'plugin/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+jobs:
+  conventional-commits:
+    name: Lint commit messages
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate conventional commit format
+        run: |
+          set -euo pipefail
+          # Conventional Commits v1.0.0: <type>[optional scope]: <description>
+          # types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+          # Allows `!` for breaking change and `(scope)`.
+          pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: .{1,72}$'
+          rc=0
+          for sha in $(git rev-list --grep='' origin/${{ github.base_ref }}..HEAD 2>/dev/null || git rev-list HEAD~10..HEAD); do
+            subj=$(git log -1 --format='%s' "$sha")
+            if ! printf '%s' "$subj" | grep -Eq "$pattern"; then
+              echo "::error::commit $sha does not follow Conventional Commits: '$subj'"
+              echo "   expected: <type>(<scope>)?: <description>  (types: feat,fix,docs,style,refactor,perf,test,build,ci,chore,revert)"
+              rc=1
+            fi
+          done
+          exit $rc
+
+  check:
+    name: cargo check + fmt + clippy + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: build (debug)
+        run: cargo build --locked --all-targets
+
+      - name: test
+        run: cargo test --locked
+
+  cross-build:
+    name: Smoke build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install aarch64 cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
