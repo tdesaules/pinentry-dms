@@ -9,67 +9,56 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/ci.yml'
-      - '.github/workflows/release.yml'
   pull_request:
     paths:
       - 'src/**'
       - 'plugin/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.github/workflows/ci.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  conventional-commits:
-    name: Lint commit messages
+  lint-commits:
+    name: Conventional commits
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Validate conventional commit format
+      - name: Validate commit messages
         run: |
           set -euo pipefail
-          # Conventional Commits v1.0.0: <type>[optional scope]: <description>
-          # types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
-          # Allows `!` for breaking change and `(scope)`.
           pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: .{1,72}$'
           rc=0
           for sha in $(git rev-list --grep='' origin/${{ github.base_ref }}..HEAD 2>/dev/null || git rev-list HEAD~10..HEAD); do
-            subj=$(git log -1 --format='%s' "$sha")
+            subj="$(git log -1 --format='%s' "$sha")"
             if ! printf '%s' "$subj" | grep -Eq "$pattern"; then
-              echo "::error::commit $sha does not follow Conventional Commits: '$subj'"
-              echo "   expected: <type>(<scope>)?: <description>  (types: feat,fix,docs,style,refactor,perf,test,build,ci,chore,revert)"
+              echo "::error::commit $sha not Conventional Commits: '$subj'"
+              echo "   expected: <type>(<scope>)?: <description> (feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)"
               rc=1
             fi
           done
           exit $rc
 
   check:
-    name: cargo check + fmt + clippy + build
+    name: fmt + clippy + build + test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo build --locked --all-targets
+      - run: cargo test --locked
 
-      - name: rustfmt
-        run: cargo fmt --all -- --check
-
-      - name: clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: build (debug)
-        run: cargo build --locked --all-targets
-
-      - name: test
-        run: cargo test --locked
-
-  cross-build:
-    name: Smoke build (${{ matrix.target }})
+  build:
+    name: Build + package (${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -91,3 +80,127 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      - name: Verify binary
+        run: |
+          test -x "target/${{ matrix.target }}/release/pinentry-dms"
+          file "target/${{ matrix.target }}/release/pinentry-dms"
+      - name: Package (binary + DMS plugin + docs)
+        id: pkg
+        run: |
+          arch=${{ matrix.target }}
+          version=$(grep -m1 '^version = "' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          staging="pinentry-dms-${version}-${arch}"
+          mkdir -p "${staging}/bin" "${staging}/plugin"
+          cp "target/${arch}/release/pinentry-dms" "${staging}/bin/"
+          cp -r plugin/. "${staging}/plugin/"
+          cp README.md CHANGELOG.md LICENSE Cargo.toml "${staging}/"
+          tar -C "${staging}" -czf "pinentry-dms-${version}-${arch}.tar.gz" .
+          sha256sum "pinentry-dms-${version}-${arch}.tar.gz" > "pinentry-dms-${version}-${arch}.tar.gz.sha256"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "--- archive contents ---"
+          tar -tzf "pinentry-dms-${version}-${arch}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pinentry-dms-${{ matrix.target }}
+          path: |
+            pinentry-dms-*-${{ matrix.target }}.tar.gz
+            pinentry-dms-*-${{ matrix.target }}.tar.gz.sha256
+
+  detect-release:
+    name: Detect version bump
+    runs-on: ubuntu-latest
+    needs: [check, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read Cargo.toml version
+        id: ver
+        run: |
+          v=$(grep -m1 '^version = "' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if ! printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Cargo.toml version '$v' is not strict semver (X.Y.Z)"
+            exit 1
+          fi
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+      - name: Check plugin.json matches Cargo.toml
+        run: |
+          cargo_v="${{ steps.ver.outputs.version }}"
+          plugin_v=$(grep -m1 '"version"' plugin/plugin.json | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$cargo_v" != "$plugin_v" ]; then
+            echo "::error::version mismatch: Cargo.toml=${cargo_v} plugin.json=${plugin_v}"
+            exit 1
+          fi
+      - name: Check if tag v<version> already exists
+        id: check
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          if git ls-remote --tags origin "refs/tags/v${v}" | grep -q .; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "tag v${v} already exists — skipping release"
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "new version v${v} detected — will release"
+          fi
+
+  release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs: [detect-release]
+    if: needs.detect-release.outputs.should_release == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Verify release assets
+        run: |
+          set -e
+          echo "--- dist/ contents ---"
+          ls -la dist/
+          version="${{ needs.detect-release.outputs.version }}"
+          for arch in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            tgz="dist/pinentry-dms-*-${arch}.tar.gz"
+            if ! ls $tgz >/dev/null 2>&1; then
+              echo "::error::missing tarball for ${arch}"; exit 1
+            fi
+            sha="${tgz}.sha256"
+            if ! ls $sha >/dev/null 2>&1; then
+              echo "::error::missing sha256 for ${arch}"; exit 1
+            fi
+          done
+          echo "all release assets present for v${version}"
+      - name: Build changelog body (matching version section)
+        run: |
+          version="${{ needs.detect-release.outputs.version }}"
+          section=$(awk -v v="${version}" '
+            /^## \[/ { in_sec=0 }
+            $0 ~ "^## \\[" v "\\]" { in_sec=1; next }
+            in_sec { print }
+          ' CHANGELOG.md)
+          if [ -z "$section" ]; then
+            echo "::warning::no CHANGELOG.md section for v${version}, using whole file"
+            section=$(cat CHANGELOG.md)
+          fi
+          {
+            echo "## Changelog"
+            echo ""
+            echo "$section"
+          } > /tmp/release-body.md
+          echo "--- body preview ---"
+          cat /tmp/release-body.md
+      - name: Create release (auto-creates tag v<version>)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.detect-release.outputs.version }}
+          name: v${{ needs.detect-release.outputs.version }}
+          body_path: /tmp/release-body.md
+          files: |
+            dist/pinentry-dms-*.tar.gz
+            dist/pinentry-dms-*.tar.gz.sha256
+          fail_on_unmatched_files: true

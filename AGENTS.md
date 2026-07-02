@@ -74,22 +74,33 @@ Settings live at `~/.config/DankMaterialShell/plugin_settings.json`; enable
   `<type>(<scope>)?!?: <description>` with types
   `feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert`.
 - Bump **both** `Cargo.toml` `version` **and** `plugin/plugin.json`
-  `"version"` together; bump `version =` in both; add a `## [x.y.z]` section
-  to `CHANGELOG.md` describing the changes.
-- To cut a release: commit the version bump, then`git tag vX.Y.Z && git push origin vX.Y.Z`.
+  `"version"` together; add a `## [x.y.z]` section to `CHANGELOG.md` describing
+  the changes.
+- **No manual tagging.** Commit + push the version bump to `main` — the CI
+  detects the new version (tag `v<version>` absent) and auto-creates the GitHub
+  release + that tag (via `softprops/action-gh-release` `tag_name`). If the
+  tag already exists, the release job is skipped (the build/test still runs).
+- Strict semver must be respected (`vX.Y.Z`, no pre/build suffixes); the CI's
+  `detect-release` job enforces this.
 
 ## CI
 
-- `.github/workflows/ci.yml` — runs on push to `main` and on PRs when files
-  under `src/`, `plugin/`, `Cargo.toml`, `Cargo.lock`, or the workflow files
-  change. Jobs: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build`,
-  `cargo test`, smoke cross-builds (x86_64 + aarch64), and Conventional
-  Commits lint on PRs.
-- `.github/workflows/release.yml` — runs only on `v*` tags. Validates semver,
-  builds `x86_64-unknown-linux-gnu` + `aarch64-unknown-linux-gnu`, packages a
-  `tar.gz` containing `bin/pinentry-dms` + `plugin/` (the DMS plugin) + docs,
-  attaches `sha256`, and publishes the GitHub release with the matching
-  `CHANGELOG.md` section as body.
+Single workflow `.github/workflows/ci.yml`, triggered on push to `main` and on
+PRs when files under `src/`, `plugin/`, `Cargo.toml`, `Cargo.lock`, or the
+workflow itself change. Jobs:
+- `lint-commits` (PR only): Conventional Commits format.
+- `check`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build`,
+  `cargo test`.
+- `build`: matrix x86_64 + aarch64 release build; packages a `tar.gz`
+  (containing `bin/pinentry-dms` + `plugin/` + docs) + `sha256`, uploads as
+ artifact (runs on PRs too, to validate cross-builds).
+- `detect-release` (push to `main` only, after `check`+`build`): reads
+  `Cargo.toml` version, asserts strict semver and parity with `plugin.json`,
+  and checks whether tag `v<version>` already exists on the remote.
+- `release` (push to `main` only, gated on `should_release == true`):
+  downloads the two arch artifacts, verifies all assets present, extracts the
+  matching `CHANGELOG.md` section as the release body, and creates the GitHub
+  release (which auto-creates the `v<version>` tag).
 - Consumers install via mise:
   `"github:tdesaules/pinentry-dms" = "latest"` in `dot_config/mise/config.toml.tmpl`.
 
