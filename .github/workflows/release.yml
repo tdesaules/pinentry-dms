@@ -94,13 +94,15 @@ jobs:
       - name: Verify release assets
         run: |
           set -e
+          echo "--- dist/ contents ---"
           ls -la dist/
           for arch in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
             tgz="dist/pinentry-dms-*-${arch}.tar.gz"
             if ! ls $tgz >/dev/null 2>&1; then
               echo "::error::missing tarball for ${arch}"; exit 1
             fi
-            if ! ls "${tgz}.sha256" >/dev/null 2>&1; then
+            sha="${tgz}.sha256"
+            if ! ls $sha >/dev/null 2>&1; then
               echo "::error::missing sha256 for ${arch}"; exit 1
             fi
           done
