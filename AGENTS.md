@@ -69,13 +69,14 @@ Settings live at `~/.config/DankMaterialShell/plugin_settings.json`; enable
 ## Versioning & release
 
 - **Strict semver** for all releases: tags must match `vX.Y.Z` (no pre/build
-  suffixes); the `validate-tag` job in `release.yml` enforces this.
-- **Conventional Commits** are enforced on pull requests by `ci.yml`:
-  `<type>(<scope>)?!?: <description>` with types
+  suffixes); the `detect-release` job in `release.yml` enforces this.
+- **Conventional Commits** are enforced on pull requests by `release.yml`'s
+  `lint-commits` job: `<type>(<scope>)?!?: <description>` with types
   `feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert`.
-- Bump **both** `Cargo.toml` `version` **and** `plugin/plugin.json`
-  `"version"` together; add a `## [x.y.z]` section to `CHANGELOG.md` describing
-  the changes.
+- Bump `Cargo.toml` `version` **and** `plugin/plugin.json` `"version"`
+  together, then **regenerate `Cargo.lock`** (e.g. `cargo build`) so the
+  `--locked` CI builds don't fail on a stale lockfile; add a `## [x.y.z]`
+  section to `CHANGELOG.md` describing the changes.
 - **No manual tagging.** Commit + push the version bump to `main` — the CI
   detects the new version (tag `v<version>` absent) and auto-creates the GitHub
   release + that tag (via `softprops/action-gh-release` `tag_name`). If the
@@ -116,21 +117,36 @@ gopass age agent status
 
 The `gopass-age-agent.service` user systemd unit is **locked at boot**
 (`ExecStartPost lock`); the first gopass op of the session is the canonical
-trigger for the modal. The unit's PATH only contains mise's shims, so the
-integration must expose the binary as `pinentry` within mise's shims (see
-"Integration" below) — the service itself needs no change.
+trigger for the modal. The agent service itself **never calls pinentry** — it
+only holds identities and decrypts ciphertext sent to it. Pinentry is invoked
+by the `gopass` **client** process (e.g. `gopass show`), so the service's PATH
+is irrelevant. See "Integration" below.
 
 ## Integration (chez-moi repo, separate)
 
-- **gopass age ignores the `age.pinentry` config value** and resolves
-  `pinentry` by PATH lookup only (verified: pointing the config at a
-  nonexistent path leaves behavior unchanged). The binary must therefore be
-  reachable on PATH **as `pinentry`** — not `pinentry-dms`.
-- The `gopass-age-agent.service` systemd unit only has mise's shims on PATH.
-  The integration must ship a shim that mise exposes as `pinentry`
-  (e.g. `~/.local/share/mise/shims/pinentry` → `pinentry-dms`), or add
-  `~/.local/bin` to the unit's `Environment=PATH=…`. A bare `pinentry-dms`
-  shin on PATH is **not** enough — gopass looks up the literal name `pinentry`.
+- **gopass-age resolves pinentry via the GnuPG agent config, not the
+  `age.pinentry` value.** The client builds its pinentry with
+  `twpayne/go-pinentry`'s `WithBinaryNameFromGnuPGAgentConf()` (see
+  `internal/backend/crypto/age/askpass.go`), which reads
+  `pinentry-program <path>` from `~/.gnupg/gpg-agent.conf`. If that line is
+  absent it falls back to a PATH lookup of the literal name `pinentry`. The
+  gopass `age.pinentry` config key is **not** consumed by this path (vestigial;
+  verified across `askpass.go`, `age.go`, `identities.go`, `commands.go`).
+- **Recommended setup: point `pinentry-program` at the mise `pinentry-dms`
+  shim.** In the chez-moi repo, `dot_gnupg/gpg-agent.conf.tmpl` contains:
+  `pinentry-program {{ .chezmoi.homedir }}/.local/share/mise/shims/pinentry-dms`
+  (absolute path — `gpg-agent.conf` does not expand `~`). No shim named
+  `pinentry` and no Cargo.toml `[[bin]]` change needed; mise already exposes
+  `pinentry-dms`.
+- The `gopass-age-agent.service` unit has **no `Environment=PATH=`** (it
+  inherits the full session PATH) and, more importantly, **never invokes
+  pinentry** — so its PATH is irrelevant. The previously documented
+  "shims-only PATH" / "needs a `pinentry` shim" constraints were incorrect.
+- `/usr/bin/pinentry` on this host is a Fedora-style **dispatcher** shell
+  script that execs `pinentry-qt`/`pinentry-gnome3`/`pinentry-tty`/etc. by
+  environment — that is why flavored pinentry binaries "just work" despite
+  callers looking up the literal name `pinentry`. The `pinentry-program`
+  override short-circuits the dispatcher entirely.
 - The existing `gopass-dms` launcher plugin **bypasses pinentry** via
   `GOPASS_AGE_PASSWORD` and is unaffected by this pinentry; both coexist.
 
