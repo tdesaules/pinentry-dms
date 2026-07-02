@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-02
+
+### Changed
+- CI consolidated into a single workflow (`.github/workflows/release.yml`)
+  that auto-publishes the GitHub release + `v<version>` tag on push to `main`
+  when the `Cargo.toml` version changes; no manual tagging required.
+- Release archive now bundles `bin/pinentry-dms` + `plugin/` (DMS plugin) +
+  docs + `sha256`.
+
 ## [0.1.0] - 2026-07-02
 
 ### Added

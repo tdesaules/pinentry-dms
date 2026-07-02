@@ -85,7 +85,7 @@ Settings live at `~/.config/DankMaterialShell/plugin_settings.json`; enable
 
 ## CI
 
-Single workflow `.github/workflows/ci.yml`, triggered on push to `main` and on
+Single workflow `.github/workflows/release.yml`, triggered on push to `main` and on
 PRs when files under `src/`, `plugin/`, `Cargo.toml`, `Cargo.lock`, or the
 workflow itself change. Jobs:
 - `lint-commits` (PR only): Conventional Commits format.
