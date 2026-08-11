@@ -127,26 +127,15 @@ pub fn zeroize_string(s: &mut String) {
     s.clear();
 }
 
-/// Deadline (in seconds) the binary waits for the DMS plugin to *connect*
-/// after firing off the IPC call. Short and distinct from the user-input
-/// deadline so that a missing/dead DMS fails fast instead of blocking for the
-/// full `SETTIMEOUT`. Overridable via `PINENTRY_DMS_CONNECT_TIMEOUT`.
-fn connect_deadline() -> Duration {
-    match std::env::var("PINENTRY_DMS_CONNECT_TIMEOUT") {
-        Ok(v) => v
-            .parse::<u64>()
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(5)),
-        Err(_) => Duration::from_secs(5),
-    }
-}
-
-/// Deadline the binary waits for the plugin to *write* its response after it
-/// has connected. Covers the user typing time when `SETTIMEOUT` is set.
-fn read_deadline(state: &crate::assuan::State) -> Duration {
-    const READ_BUFFER: Duration = Duration::from_secs(10);
+/// Deadline the binary waits for the plugin to connect AND write its
+/// response. The plugin only connects its socket AFTER the user has typed
+/// (it connects in `sendResponse`, right before writing the JSON), so this
+/// deadline must cover the user's typing time, not just the IPC roundtrip.
+/// When `SETTIMEOUT` is set it's that plus a buffer; otherwise 60s.
+fn dialog_deadline(state: &crate::assuan::State) -> Duration {
+    const BUFFER: Duration = Duration::from_secs(10);
     if state.timeout > 0 {
-        Duration::from_secs(state.timeout as u64).saturating_add(READ_BUFFER)
+        Duration::from_secs(state.timeout as u64).saturating_add(BUFFER)
     } else {
         Duration::from_secs(60)
     }
@@ -200,8 +189,12 @@ fn run_dialog(
     let req_json =
         serde_json::to_string(&req).map_err(|e| io::Error::other(format!("marshal: {e}")))?;
 
-    // Fire off the IPC command detached: the Go reference does not wait for it.
-    let child = Command::new("dms")
+    // Fire off the IPC command. We keep the child handle so we can detect a
+    // fast failure: `dms ipc call` exits non-zero quickly if DMS is down or
+    // the handler is missing, which lets us fail fast instead of blocking for
+    // the full user-input deadline. If the child is alive or exited 0 (IPC was
+    // received, the plugin is showing a modal), we keep waiting for the user.
+    let mut child = Command::new("dms")
         .args(["ipc", "call", "pinentryDms", "prompt", &req_json])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -216,40 +209,38 @@ fn run_dialog(
         );
     }
 
-    accept_and_read(listener, state, debug)
+    let deadline = dialog_deadline(state);
+    if debug {
+        eprintln!(
+            "-> waiting for plugin response (deadline {}s)",
+            deadline.as_secs()
+        );
+    }
+
+    accept_and_read(listener, &mut child, deadline, debug)
 }
 
-/// Accept the plugin's connection within a short connect deadline, then read
-/// its JSON response within the (longer) user-input deadline. The two
-/// deadlines are separated so a missing/dead DMS fails fast instead of
-/// blocking for the full `SETTIMEOUT`.
+/// Accept the plugin's connection and read its JSON response within a single
+/// deadline that covers the user's typing time (the plugin connects only
+/// AFTER the user types, in `sendResponse`). While waiting, we poll the `dms`
+/// IPC child: if it exits non-zero, DMS is unreachable / the handler is gone,
+/// so we fail fast instead of blocking for the full deadline.
 fn accept_and_read(
     listener: &UnixListener,
-    state: &crate::assuan::State,
+    child: &mut std::process::Child,
+    deadline: Duration,
     debug: bool,
 ) -> io::Result<Response> {
-    let c_deadline = connect_deadline();
-    if debug {
-        eprintln!(
-            "-> waiting for plugin connect (deadline {}s)",
-            c_deadline.as_secs()
-        );
-    }
-    let conn = poll_accept(listener, c_deadline)?;
-
-    let r_deadline = read_deadline(state);
-    if debug {
-        eprintln!(
-            "<- plugin connected, waiting for response (deadline {}s)",
-            r_deadline.as_secs()
-        );
-    }
-    // Fresh start: the read deadline covers only time spent reading, so the
-    // user keeps the full window to type after the plugin has connected.
-    poll_read_line(conn, r_deadline, debug)
+    let conn = poll_accept(listener, child, deadline, debug)?;
+    poll_read_line(conn, deadline, debug)
 }
 
-fn poll_accept(listener: &UnixListener, deadline: Duration) -> io::Result<UnixStream> {
+fn poll_accept(
+    listener: &UnixListener,
+    child: &mut std::process::Child,
+    deadline: Duration,
+    debug: bool,
+) -> io::Result<UnixStream> {
     listener.set_nonblocking(true)?;
     let start = Instant::now();
     loop {
@@ -259,6 +250,24 @@ fn poll_accept(listener: &UnixListener, deadline: Duration) -> io::Result<UnixSt
                 return Ok(stream);
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // Fast-fail: if the `dms ipc call` child has already exited
+                // with a non-zero status, DMS is unreachable or the handler is
+                // missing — no modal will ever appear. Abort now rather than
+                // blocking for the full user-input deadline.
+                if let Ok(Some(status)) = child.try_wait() {
+                    if !status.success() {
+                        if debug {
+                            eprintln!("<- dms ipc call child exited {status} (DMS unreachable)");
+                        }
+                        return Err(io::Error::new(
+                            io::ErrorKind::ConnectionRefused,
+                            "accept: dms ipc call failed (DMS unreachable or handler missing)",
+                        ));
+                    }
+                    // Child exited 0: the IPC was received and the plugin is
+                    // showing a modal. Keep waiting for the user to type and
+                    // the plugin to connect back with the response.
+                }
                 if start.elapsed() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
@@ -405,10 +414,17 @@ mod tests {
     }
 
     #[test]
-    fn connect_deadline_default_is_5s() {
-        // Only assert the default when the env var is not set in the test env.
-        if std::env::var("PINENTRY_DMS_CONNECT_TIMEOUT").is_err() {
-            assert_eq!(connect_deadline(), Duration::from_secs(5));
-        }
+    fn dialog_deadline_defaults_to_60s_when_no_timeout() {
+        let state = crate::assuan::State::default();
+        assert_eq!(dialog_deadline(&state), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn dialog_deadline_uses_settimeout_plus_buffer() {
+        let state = crate::assuan::State {
+            timeout: 30,
+            ..Default::default()
+        };
+        assert_eq!(dialog_deadline(&state), Duration::from_secs(40));
     }
 }

@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-11
+
+### Fixed
+- A1 fast-fail was broken: the connect deadline (5s) expired before the
+  user could type, because the DMS plugin only connects its response
+  socket AFTER the user submits the passphrase (in `sendResponse`), not
+  when the modal appears. Replaced the split connect/read deadlines with
+  a single deadline covering the full user-input window. Fast-fail is
+  now achieved by polling the `dms ipc call` child: if it exits non-zero
+  (DMS unreachable / handler missing) we abort immediately; if it exits 0
+  or stays alive (IPC received, modal showing) we keep waiting for the
+  user. Restores normal `gopass show` which was failing with "DMS plugin
+  never connected" after 5s.
+
 ## [1.2.0] - 2026-08-11
 
 ### Added
