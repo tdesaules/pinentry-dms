@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-11
+
+### Added
+- Deduplication of concurrent `GETPIN` prompts: when N gopass processes
+  prompt for the same passphrase at once (e.g. boot-time `git fetch` +
+  `chezmoi apply` + IDE git fetch hitting a locked agent), the plugin now
+  shows ONE modal and broadcasts the passphrase to every waiting socket.
+  Previously each concurrent prompt was queued and shown sequentially
+  ("popup storm"); before that, v1.0.0 clobbered them (lost responses).
+- Best-effort pre-unlock of the gopass age agent at DMS session start: the
+  plugin fires `gopass age agent unlock` once on load so the agent has
+  identities before background callers hit a locked agent. This prevents
+  the half-unlocked zombie state (locked=false, identities=nil) where every
+  gopass client re-prompts indefinitely. Failure is non-fatal.
+
 ## [1.1.0] - 2026-08-11
 
 ### Added

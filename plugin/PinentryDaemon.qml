@@ -20,6 +20,15 @@ PluginComponent {
     property var activeModal: null
     property string activeSocketPath: ""
     property var pendingQueue: []
+    // Sockets awaiting the SAME getpin response as the active modal. When N
+    // gopass processes prompt concurrently for the same passphrase, we show
+    // ONE modal and broadcast the result to the active socket + all these.
+    property var pendingGetpinSockets: []
+    // One-shot: trigger a gopass age agent unlock when DMS starts so the agent
+    // has identities before background callers (git credential helper, etc.)
+    // hit a locked agent and spawn a pinentry storm. Fires once per plugin
+    // load. Best-effort: if gopass isn't ready the call just fails silently.
+    property bool _preUnlockFired: false
 
     IpcHandler {
         target: "pinentryDms"
@@ -37,19 +46,31 @@ PluginComponent {
     }
 
     function showModal(req) {
-        // If a modal is already active, queue this request rather than
-        // clobbering the in-flight one (which would leave the first pinentry
-        // process waiting for a response that never comes). Queued prompts
-        // are shown sequentially as each previous one closes.
-        if (activeModal) {
-            pendingQueue.push(req);
-            return;
+        const kind = req.type || "getpin"
+
+        // Dedup concurrent getpin prompts: if a getpin modal is already
+        // active, attach this caller's socket to it. When the active modal
+        // resolves, the passphrase is broadcast to all attached sockets, so
+        // the user types once and every concurrent gopass process is served.
+        // This avoids a storm of modals when many callers hit a locked agent
+        // at once (e.g. boot-time git fetch + chezmoi apply + IDE git fetch).
+        if (activeModal && kind === "getpin") {
+            pendingGetpinSockets.push(req.socket || "")
+            return
         }
 
-        activeSocketPath = req.socket || "";
+        // Non-getpin prompts, or the first getpin: if a different modal is
+        // active, queue it for sequential display (no dedup for
+        // confirm/message — they are distinct operations).
+        if (activeModal) {
+            pendingQueue.push(req)
+            return
+        }
+
+        activeSocketPath = req.socket || ""
 
         activeModal = pinentryModalComponent.createObject(root, {
-            "modalType": req.type || "getpin",
+            "modalType": kind,
             "title": req.title || "Pinentry",
             "desc": req.desc || "",
             "prompt": req.prompt || "",
@@ -71,20 +92,36 @@ PluginComponent {
         activeModal.show();
     }
 
+    // Send `response` to the active socket AND any sockets waiting on the
+    // same getpin (dedup broadcast), then close the modal. `response` is a
+    // JS object like {"type":"pin","value":"..."}.
     function sendResponse(response) {
-        if (!activeSocketPath) {
-            console.error("PinentryDms: no socket path to respond to");
-            return;
-        }
-        const json = JSON.stringify(response);
-        const socketPath = activeSocketPath;
-        activeSocketPath = "";
+        const json = JSON.stringify(response)
 
+        // Active socket (may be empty if already consumed — defensive).
+        if (activeSocketPath) {
+            root._writeSocket(activeSocketPath, json)
+            activeSocketPath = ""
+        }
+        // Broadcast to dedup'd getpin waiters.
+        for (let i = 0; i < pendingGetpinSockets.length; i++) {
+            root._writeSocket(pendingGetpinSockets[i], json)
+        }
+        pendingGetpinSockets = []
+    }
+
+    // Open a socket to `path`, write `payload + "\n"`, self-destruct. Used
+    // for both the single active response and the dedup broadcast.
+    function _writeSocket(path, payload) {
+        if (!path) {
+            console.error("PinentryDms: empty socket path, dropping response")
+            return
+        }
         const sock = responseSocketComponent.createObject(root, {
-            "path": socketPath,
-            "payload": json
-        });
-        sock.connected = true;
+            "path": path,
+            "payload": payload
+        })
+        sock.connected = true
     }
 
     function handleSubmit(value) {
@@ -122,6 +159,32 @@ PluginComponent {
         if (pendingQueue.length > 0) {
             const next = pendingQueue.shift();
             showModal(next);
+        }
+    }
+
+    // F3: best-effort pre-unlock of the gopass age agent at plugin load. Fires
+    // a `gopass age agent unlock` once; if the agent is already unlocked with
+    // identities this is a no-op (gopass returns quickly), if it's locked the
+    // user gets a single predictable prompt at session start instead of a
+    // storm from background callers. Failure is non-fatal (gopass not on PATH
+    // yet, etc.) — the normal pinentry flow still works as a fallback.
+    function _preUnlockAgent() {
+        if (_preUnlockFired)
+            return
+        _preUnlockFired = true
+        const proc = preUnlockComponent.createObject(root)
+        proc.running = true
+    }
+
+    property Component preUnlockComponent: Component {
+        Process {
+            command: ["gopass", "age", "agent", "unlock"]
+            stdout: SplitParser { onRead: line => {} }
+            stderr: SplitParser { onRead: line => {} }
+            onExited: (exitCode) => {
+                console.info("PinentryDms: pre-unlock exit " + exitCode)
+                destroy()
+            }
         }
     }
 
@@ -617,6 +680,11 @@ PluginComponent {
 
     Component.onCompleted: {
         console.info("PinentryDms: daemon started");
+        // F3: pre-unlock the gopass age agent once at session start so the
+        // agent has identities before background callers (git credential
+        // helper, chezmoi apply, IDE git fetch) hit a locked agent and spawn
+        // a pinentry storm. Best-effort; the normal prompt flow still works.
+        Qt.callLater(_preUnlockAgent);
     }
 
     Component.onDestruction: {
