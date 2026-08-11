@@ -33,6 +33,10 @@ pub struct Request {
     #[serde(rename = "error")]
     pub error_text: String,
     #[serde(skip_serializing_if = "String::is_empty")]
+    pub key_info: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub repeat_error: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub ok_label: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub cancel_label: String,
@@ -42,6 +46,8 @@ pub struct Request {
     pub timeout: i32,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub repeat: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub grab: bool,
 }
 
 /// Response the plugin writes back over the socket.
@@ -105,9 +111,51 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
+/// Zeroize a `String`'s backing buffer in place. Best-effort: overwrites the
+/// heap bytes with zeros before the string is dropped, so a passphrase does
+/// not linger in freed memory. Used for the GETPIN response value.
+pub fn zeroize_string(s: &mut String) {
+    // Safety: we have exclusive (`&mut`) access to the String, and
+    // `as_bytes_mut` gives a mutable view over its heap-allocated buffer.
+    // We overwrite every byte with 0 before the String is dropped/consumed.
+    unsafe {
+        let bytes = s.as_bytes_mut();
+        for b in bytes.iter_mut() {
+            *b = 0;
+        }
+    }
+    s.clear();
+}
+
+/// Deadline (in seconds) the binary waits for the DMS plugin to *connect*
+/// after firing off the IPC call. Short and distinct from the user-input
+/// deadline so that a missing/dead DMS fails fast instead of blocking for the
+/// full `SETTIMEOUT`. Overridable via `PINENTRY_DMS_CONNECT_TIMEOUT`.
+fn connect_deadline() -> Duration {
+    match std::env::var("PINENTRY_DMS_CONNECT_TIMEOUT") {
+        Ok(v) => v
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(5)),
+        Err(_) => Duration::from_secs(5),
+    }
+}
+
+/// Deadline the binary waits for the plugin to *write* its response after it
+/// has connected. Covers the user typing time when `SETTIMEOUT` is set.
+fn read_deadline(state: &crate::assuan::State) -> Duration {
+    const READ_BUFFER: Duration = Duration::from_secs(10);
+    if state.timeout > 0 {
+        Duration::from_secs(state.timeout as u64).saturating_add(READ_BUFFER)
+    } else {
+        Duration::from_secs(60)
+    }
+}
+
 /// Show the modal by signaling the DMS plugin and awaiting its reply over the
 /// freshly created Unix socket. `kind` is `getpin`, `confirm`, or `message`.
-pub fn show_modal(kind: &str, state: &crate::assuan::State) -> io::Result<Response> {
+/// `debug` enables stderr tracing of the IPC exchange.
+pub fn show_modal(kind: &str, state: &crate::assuan::State, debug: bool) -> io::Result<Response> {
     let sock_path = socket_path();
 
     // Remove any stale socket.
@@ -117,7 +165,7 @@ pub fn show_modal(kind: &str, state: &crate::assuan::State) -> io::Result<Respon
     // Owner-only permissions.
     let _ = fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600));
 
-    let result = run_dialog(kind, state, &sock_path, &listener);
+    let result = run_dialog(kind, state, &sock_path, &listener, debug);
 
     // Always clean up.
     drop(listener);
@@ -131,6 +179,7 @@ fn run_dialog(
     state: &crate::assuan::State,
     sock_path: &Path,
     listener: &UnixListener,
+    debug: bool,
 ) -> io::Result<Response> {
     let req = Request {
         kind: kind.to_string(),
@@ -139,40 +188,65 @@ fn run_dialog(
         desc: state.desc.clone(),
         prompt: state.prompt.clone(),
         error_text: state.error.clone(),
+        key_info: state.key_info.clone(),
+        repeat_error: state.repeat_error.clone(),
         ok_label: state.ok_label.clone(),
         cancel_label: state.cancel_label.clone(),
         not_ok_label: state.not_ok_label.clone(),
         timeout: state.timeout,
         repeat: state.repeat,
+        grab: state.grab,
     };
     let req_json =
         serde_json::to_string(&req).map_err(|e| io::Error::other(format!("marshal: {e}")))?;
 
     // Fire off the IPC command detached: the Go reference does not wait for it.
-    let _child = Command::new("dms")
+    let child = Command::new("dms")
         .args(["ipc", "call", "pinentryDms", "prompt", &req_json])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
 
-    accept_and_read(listener, state)
-}
-
-/// Accept the plugin's connection (within a buffered timeout) and decode the
-/// JSON response. Mirrors the Go accept-deadline + read-deadline logic without
-/// pulling in extra crates: we poll the non-blocking listener and stream.
-fn accept_and_read(listener: &UnixListener, state: &crate::assuan::State) -> io::Result<Response> {
-    const ACCEPT_BUFFER: Duration = Duration::from_secs(10);
-    let mut accept_deadline = Duration::from_secs(60);
-    if state.timeout > 0 {
-        accept_deadline = Duration::from_secs(state.timeout as u64).saturating_add(ACCEPT_BUFFER);
+    if debug {
+        eprintln!(
+            "-> dms ipc call pinentryDms prompt (child pid {}, socket {})",
+            child.id(),
+            sock_path.display()
+        );
     }
 
-    let conn = poll_accept(listener, accept_deadline)?;
+    accept_and_read(listener, state, debug)
+}
 
-    // Read until a newline or the deadline (the plugin writes `<json>\n`).
-    poll_read_line(conn, accept_deadline)
+/// Accept the plugin's connection within a short connect deadline, then read
+/// its JSON response within the (longer) user-input deadline. The two
+/// deadlines are separated so a missing/dead DMS fails fast instead of
+/// blocking for the full `SETTIMEOUT`.
+fn accept_and_read(
+    listener: &UnixListener,
+    state: &crate::assuan::State,
+    debug: bool,
+) -> io::Result<Response> {
+    let c_deadline = connect_deadline();
+    if debug {
+        eprintln!(
+            "-> waiting for plugin connect (deadline {}s)",
+            c_deadline.as_secs()
+        );
+    }
+    let conn = poll_accept(listener, c_deadline)?;
+
+    let r_deadline = read_deadline(state);
+    if debug {
+        eprintln!(
+            "<- plugin connected, waiting for response (deadline {}s)",
+            r_deadline.as_secs()
+        );
+    }
+    // Fresh start: the read deadline covers only time spent reading, so the
+    // user keeps the full window to type after the plugin has connected.
+    poll_read_line(conn, r_deadline, debug)
 }
 
 fn poll_accept(listener: &UnixListener, deadline: Duration) -> io::Result<UnixStream> {
@@ -198,7 +272,7 @@ fn poll_accept(listener: &UnixListener, deadline: Duration) -> io::Result<UnixSt
     }
 }
 
-fn poll_read_line(mut conn: UnixStream, deadline: Duration) -> io::Result<Response> {
+fn poll_read_line(mut conn: UnixStream, deadline: Duration, debug: bool) -> io::Result<Response> {
     conn.set_nonblocking(true)?;
     let start = Instant::now();
     let mut buf = Vec::<u8>::with_capacity(256);
@@ -228,10 +302,113 @@ fn poll_read_line(mut conn: UnixStream, deadline: Duration) -> io::Result<Respon
         }
     }
 
+    if debug {
+        eprintln!(
+            "<- plugin response in {}ms ({} bytes)",
+            start.elapsed().as_millis(),
+            buf.len()
+        );
+    }
+
     // Trim trailing newline/whitespace.
     while matches!(buf.last(), Some(b'\n') | Some(b'\r') | Some(b' ')) {
         buf.pop();
     }
 
     serde_json::from_slice::<Response>(&buf).map_err(|e| io::Error::other(format!("decode: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_omits_empty_optional_fields() {
+        let req = Request {
+            kind: "getpin".into(),
+            socket: "/tmp/x.sock".into(),
+            title: String::new(),
+            desc: String::new(),
+            prompt: String::new(),
+            error_text: String::new(),
+            key_info: String::new(),
+            repeat_error: String::new(),
+            ok_label: String::new(),
+            cancel_label: String::new(),
+            not_ok_label: String::new(),
+            timeout: 0,
+            repeat: false,
+            grab: false,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        // Required fields always present.
+        assert!(json.contains("\"type\":\"getpin\""));
+        assert!(json.contains("\"socket\":\"/tmp/x.sock\""));
+        // Empty/zero/false optional fields are skipped.
+        assert!(!json.contains("title"));
+        assert!(!json.contains("keyInfo"));
+        assert!(!json.contains("repeatError"));
+        assert!(!json.contains("grab"));
+        assert!(!json.contains("timeout"));
+    }
+
+    #[test]
+    fn request_serializes_camel_case_with_keyinfo_and_repeaterror() {
+        let req = Request {
+            kind: "getpin".into(),
+            socket: "/tmp/y.sock".into(),
+            title: "T".into(),
+            desc: String::new(),
+            prompt: String::new(),
+            error_text: "err".into(),
+            key_info: "gopass/age-identities".into(),
+            repeat_error: "Passphrases do not match".into(),
+            ok_label: String::new(),
+            cancel_label: "Cancel".into(),
+            not_ok_label: String::new(),
+            timeout: 30,
+            repeat: true,
+            grab: true,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        // camelCase + rename rules.
+        assert!(json.contains("\"error\":\"err\""));
+        assert!(json.contains("\"keyInfo\":\"gopass/age-identities\""));
+        assert!(json.contains("\"repeatError\":\"Passphrases do not match\""));
+        assert!(json.contains("\"cancelLabel\":\"Cancel\""));
+        assert!(json.contains("\"timeout\":30"));
+        assert!(json.contains("\"repeat\":true"));
+        assert!(json.contains("\"grab\":true"));
+    }
+
+    #[test]
+    fn response_decodes_pin_with_value() {
+        let json = b"{\"type\":\"pin\",\"value\":\"hunter2\"}\n";
+        let resp: Response = serde_json::from_slice(json).unwrap();
+        assert_eq!(resp.kind, "pin");
+        assert_eq!(resp.value, "hunter2");
+    }
+
+    #[test]
+    fn response_decodes_cancel_without_value() {
+        let json = b"{\"type\":\"cancel\"}";
+        let resp: Response = serde_json::from_slice(json).unwrap();
+        assert_eq!(resp.kind, "cancel");
+        assert_eq!(resp.value, ""); // default
+    }
+
+    #[test]
+    fn zeroize_string_clears_buffer() {
+        let mut s = String::from("s3cr3t");
+        zeroize_string(&mut s);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn connect_deadline_default_is_5s() {
+        // Only assert the default when the env var is not set in the test env.
+        if std::env::var("PINENTRY_DMS_CONNECT_TIMEOUT").is_err() {
+            assert_eq!(connect_deadline(), Duration::from_secs(5));
+        }
+    }
 }

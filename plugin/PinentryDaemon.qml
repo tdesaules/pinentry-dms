@@ -19,6 +19,7 @@ PluginComponent {
 
     property var activeModal: null
     property string activeSocketPath: ""
+    property var pendingQueue: []
 
     IpcHandler {
         target: "pinentryDms"
@@ -36,9 +37,13 @@ PluginComponent {
     }
 
     function showModal(req) {
+        // If a modal is already active, queue this request rather than
+        // clobbering the in-flight one (which would leave the first pinentry
+        // process waiting for a response that never comes). Queued prompts
+        // are shown sequentially as each previous one closes.
         if (activeModal) {
-            activeModal.destroy();
-            activeModal = null;
+            pendingQueue.push(req);
+            return;
         }
 
         activeSocketPath = req.socket || "";
@@ -49,6 +54,8 @@ PluginComponent {
             "desc": req.desc || "",
             "prompt": req.prompt || "",
             "errorText": req.error || "",
+            "keyInfo": req.keyInfo || "",
+            "repeatError": req.repeatError || "",
             "okLabel": req.okLabel || "",
             "cancelLabel": req.cancelLabel || "",
             "notOkLabel": req.notOkLabel || "",
@@ -111,6 +118,11 @@ PluginComponent {
             activeModal.destroy();
             activeModal = null;
         }
+        // Drain the queue: show the next pending prompt, if any.
+        if (pendingQueue.length > 0) {
+            const next = pendingQueue.shift();
+            showModal(next);
+        }
     }
 
     // Response socket: connects to the path the binary is listening on and
@@ -140,6 +152,8 @@ PluginComponent {
             property string desc: ""
             property string prompt: ""
             property string errorText: ""
+            property string keyInfo: ""
+            property string repeatError: ""
             property string okLabel: ""
             property string cancelLabel: ""
             property string notOkLabel: ""
@@ -203,7 +217,13 @@ PluginComponent {
                         Qt.callLater(() => repeatField.forceActiveFocus());
                         return;
                     }
-                    submitted(passwordInput);
+                    const value = passwordInput;
+                    // Zeroize the in-memory copies as soon as the value has been
+                    // handed off to the response handler, so the passphrase
+                    // does not linger in QML string bindings.
+                    passwordInput = "";
+                    repeatInput = "";
+                    submitted(value);
                 } else {
                     confirmed();
                 }
@@ -355,9 +375,10 @@ PluginComponent {
                     }
 
                     // Error / mismatch banner — kept near the top so users see
-                    // it before re-typing.
+                    // it before re-typing. Uses the SETREPEAT error text when
+                    // provided, falling back to a generic message.
                     StyledText {
-                        text: repeatMismatch ? "Passphrases do not match" : modal.errorText
+                        text: repeatMismatch ? (modal.repeatError || "Passphrases do not match") : modal.errorText
                         font.pixelSize: Theme.fontSizeSmall
                         color: Theme.error
                         width: parent.width
@@ -372,6 +393,18 @@ PluginComponent {
                         font.pixelSize: Theme.fontSizeMedium
                         color: Theme.surfaceText
                         width: parent.width
+                        visible: text !== "" && isGetPin
+                        height: visible ? implicitHeight : 0
+                    }
+
+                    // Key info — which key/secret is being unlocked (SETKEYINFO).
+                    // Discrete monospace label under the prompt.
+                    StyledText {
+                        text: modal.keyInfo
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.surfaceTextMedium
+                        width: parent.width
+                        wrapMode: Text.Wrap
                         visible: text !== "" && isGetPin
                         height: visible ? implicitHeight : 0
                     }

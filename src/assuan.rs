@@ -296,3 +296,198 @@ pub fn percent_encode(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_encode_escapes_only_percent_and_newlines() {
+        assert_eq!(percent_encode("hello"), "hello");
+        assert_eq!(percent_encode("100%"), "100%25");
+        assert_eq!(percent_encode("a\nb"), "a%0Ab");
+        assert_eq!(percent_encode("a\rb"), "a%0Db");
+        // `+` and space are literal (NOT url-query encoding).
+        assert_eq!(percent_encode("a+b c"), "a+b c");
+    }
+
+    #[test]
+    fn percent_decode_handles_hex_and_plus_literal() {
+        assert_eq!(percent_decode("hello"), "hello");
+        assert_eq!(percent_decode("100%25"), "100%");
+        assert_eq!(percent_decode("a%0Ab"), "a\nb");
+        assert_eq!(percent_decode("a%0Db"), "a\rb");
+        // `+` is literal, NOT a space.
+        assert_eq!(percent_decode("a+b"), "a+b");
+        // Lower and upper hex both accepted.
+        assert_eq!(percent_decode("%0a%0A"), "\n\n");
+        assert_eq!(percent_decode("%0D%0d"), "\r\r");
+    }
+
+    #[test]
+    fn percent_decode_roundtrips_with_encode() {
+        for s in ["hello", "100%", "a\nb\rc", "espèce café %+"] {
+            assert_eq!(percent_decode(&percent_encode(s)), s);
+        }
+    }
+
+    #[test]
+    fn percent_decode_truncated_hex_is_literal() {
+        // A `%` not followed by two hex digits is left as a literal `%`.
+        assert_eq!(percent_decode("%2"), "%2");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("%"), "%");
+    }
+
+    #[test]
+    fn error_wire_packs_source_and_code() {
+        // (source << 24) | code. Pinentry source = 5.
+        let e = Error::canceled();
+        assert_eq!(e.code, 99);
+        assert_eq!(e.wire(), (5u32 << 24) | 99);
+
+        let e = Error::timeout();
+        assert_eq!(e.code, 62);
+        assert_eq!(e.wire(), (5u32 << 24) | 62);
+
+        let e = Error::not_confirmed();
+        assert_eq!(e.code, 114);
+        assert_eq!(e.wire(), (5u32 << 24) | 114);
+
+        let e = Error::general();
+        assert_eq!(e.code, 49);
+        assert_eq!(e.wire(), (5u32 << 24) | 49);
+    }
+
+    #[test]
+    fn error_with_message_replaces_only_message() {
+        let e = Error::general().with_message("boom");
+        assert_eq!(e.code, 49);
+        assert_eq!(e.message, "boom");
+    }
+
+    #[test]
+    fn source_name_pinentry_is_some_unspecified_none() {
+        assert_eq!(Source::Pinentry.name(), Some("Pinentry"));
+        assert_eq!(Source::Unspecified.name(), None);
+    }
+
+    #[test]
+    fn apply_command_recognizes_set_commands() {
+        let mut s = State::default();
+        assert!(s.apply_command(&Command {
+            name: "SETTITLE".into(),
+            param: "My Title".into(),
+        }));
+        assert_eq!(s.title, "My Title");
+
+        assert!(s.apply_command(&Command {
+            name: "SETKEYINFO".into(),
+            param: "gopass/age-identities".into(),
+        }));
+        assert_eq!(s.key_info, "gopass/age-identities");
+
+        assert!(s.apply_command(&Command {
+            name: "SETREPEAT".into(),
+            param: "Passphrases do not match".into(),
+        }));
+        assert!(s.repeat);
+        assert_eq!(s.repeat_error, "Passphrases do not match");
+
+        // Unknown command is not handled.
+        assert!(!s.apply_command(&Command {
+            name: "NOPE".into(),
+            param: "".into(),
+        }));
+    }
+
+    #[test]
+    fn apply_command_percent_decodes_params() {
+        let mut s = State::default();
+        assert!(s.apply_command(&Command {
+            name: "SETDESC".into(),
+            param: "Enter%20passphrase%0Afor key".into(),
+        }));
+        assert_eq!(s.desc, "Enter passphrase\nfor key");
+    }
+
+    #[test]
+    fn apply_option_parses_grab_and_tty() {
+        let mut s = State::default();
+        s.apply_command(&Command {
+            name: "OPTION".into(),
+            param: "grab".into(),
+        });
+        assert!(s.grab);
+
+        s.apply_command(&Command {
+            name: "OPTION".into(),
+            param: "no-grab".into(),
+        });
+        assert!(!s.grab);
+
+        s.apply_command(&Command {
+            name: "OPTION".into(),
+            param: "ttyname=/dev/tty1".into(),
+        });
+        assert_eq!(s.tty_name, "/dev/tty1");
+    }
+
+    #[test]
+    fn settimeout_parses_value() {
+        let mut s = State::default();
+        s.apply_command(&Command {
+            name: "SETTIMEOUT".into(),
+            param: "30".into(),
+        });
+        assert_eq!(s.timeout, 30);
+        // Non-numeric falls back to 0.
+        s.apply_command(&Command {
+            name: "SETTIMEOUT".into(),
+            param: "abc".into(),
+        });
+        assert_eq!(s.timeout, 0);
+    }
+
+    #[test]
+    fn reset_clears_error_only() {
+        let mut s = State {
+            title: "T".into(),
+            error: "bad pin".into(),
+            timeout: 30,
+            ..State::default()
+        };
+        s.reset();
+        assert_eq!(s.error, "");
+        assert_eq!(s.title, "T");
+        assert_eq!(s.timeout, 30);
+    }
+
+    #[test]
+    fn reader_parses_name_and_param() {
+        let input = b"SETTITLE My Title\nGETPIN\n";
+        let mut r = Reader::new(io::Cursor::new(input));
+        let c1 = r.read_command().unwrap().unwrap();
+        assert_eq!(c1.name, "SETTITLE");
+        assert_eq!(c1.param, "My Title");
+        let c2 = r.read_command().unwrap().unwrap();
+        assert_eq!(c2.name, "GETPIN");
+        assert_eq!(c2.param, "");
+        assert!(r.read_command().unwrap().is_none());
+    }
+
+    #[test]
+    fn reader_uppercases_command_name() {
+        let mut r = Reader::new(io::Cursor::new(b"getpin\n"));
+        let c = r.read_command().unwrap().unwrap();
+        assert_eq!(c.name, "GETPIN");
+    }
+
+    #[test]
+    fn reader_strips_trailing_cr() {
+        let mut r = Reader::new(io::Cursor::new(b"GETPIN\r\n"));
+        let c = r.read_command().unwrap().unwrap();
+        assert_eq!(c.name, "GETPIN");
+        assert_eq!(c.param, "");
+    }
+}

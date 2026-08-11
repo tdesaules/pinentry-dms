@@ -6,6 +6,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-11
+
+### Added
+- Forward `SETKEYINFO` and `SETREPEAT` error text to the DMS modal: the
+  plugin now displays which key is being unlocked (discrete label under the
+  prompt) and uses the caller-provided repeat-error message instead of a
+  hardcoded string.
+- `--version` / `--help` CLI flags (exit before the Assuan greeting).
+- Verbose `--debug` tracing of the IPC exchange: child pid, socket path,
+  connect/read deadlines, response timing.
+- 21 unit tests covering Assuan percent encode/decode (including `+`
+  literal), `Error::wire` packing, `Command` parsing, `State::apply_command`,
+  `Request`/`Response` serde, and passphrase zeroization.
+
+### Changed
+- Fast-fail when DMS is unreachable: the connect deadline is now a short,
+  dedicated window (5s, overridable via `PINENTRY_DMS_CONNECT_TIMEOUT`),
+  distinct from the user-input read deadline. A missing/dead DMS now errors
+  in ~5s instead of blocking for the full `SETTIMEOUT` (60s by default).
+- Concurrent prompts are now queued instead of clobbering the in-flight
+  modal (the previous behavior left the first pinentry process waiting for
+  a response that never came).
+- Passphrase is zeroized from Rust memory after being sent on the Assuan
+  `D` line, and the QML modal clears its input bindings immediately after
+  emitting `submitted`.
+
+### Fixed
+- README now documents the correct gopass+age integration (`pinentry-program`
+  in `~/.gnupg/gpg-agent.conf`), not the vestigial `age.pinentry` config key.
+  Added a Troubleshooting section and notes on the passphrase caching
+  lifecycle.
+
 ## [1.0.0] - 2026-07-02
 
 ### Changed

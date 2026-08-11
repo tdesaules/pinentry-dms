@@ -42,15 +42,15 @@ fn main() {
 
         match cmd.name.as_str() {
             "GETPIN" => {
-                handle_get_pin(&mut state, &mut writer);
+                handle_get_pin(&mut state, &mut writer, args.debug);
                 state.reset();
             }
             "CONFIRM" => {
                 let one_button = cmd.param == "--one-button";
-                handle_confirm(&mut state, &mut writer, one_button);
+                handle_confirm(&mut state, &mut writer, one_button, args.debug);
             }
             "MESSAGE" => {
-                handle_message(&mut state, &mut writer);
+                handle_message(&mut state, &mut writer, args.debug);
             }
             "GETINFO" => handle_get_info(&cmd, &mut writer),
             "BYE" => {
@@ -78,12 +78,14 @@ fn main() {
     }
 }
 
-fn handle_get_pin(state: &mut State, writer: &mut Writer<impl Write>) {
-    match ipc::show_modal("getpin", state) {
-        Ok(resp) => match resp.kind.as_str() {
+fn handle_get_pin(state: &mut State, writer: &mut Writer<impl Write>, debug: bool) {
+    match ipc::show_modal("getpin", state, debug) {
+        Ok(mut resp) => match resp.kind.as_str() {
             "pin" => {
                 let _ = writer.data(&resp.value);
                 let _ = writer.ok("");
+                // Zeroize the passphrase copy we hold before it is dropped.
+                ipc::zeroize_string(&mut resp.value);
             }
             "cancel" => {
                 let _ = writer.err(&Error::canceled());
@@ -101,9 +103,14 @@ fn handle_get_pin(state: &mut State, writer: &mut Writer<impl Write>) {
     }
 }
 
-fn handle_confirm(state: &mut State, writer: &mut Writer<impl Write>, one_button: bool) {
+fn handle_confirm(
+    state: &mut State,
+    writer: &mut Writer<impl Write>,
+    one_button: bool,
+    debug: bool,
+) {
     let kind = if one_button { "message" } else { "confirm" };
-    match ipc::show_modal(kind, state) {
+    match ipc::show_modal(kind, state, debug) {
         Ok(resp) => match resp.kind.as_str() {
             "ok" => {
                 let _ = writer.ok("");
@@ -127,8 +134,8 @@ fn handle_confirm(state: &mut State, writer: &mut Writer<impl Write>, one_button
     }
 }
 
-fn handle_message(state: &mut State, writer: &mut Writer<impl Write>) {
-    match ipc::show_modal("message", state) {
+fn handle_message(state: &mut State, writer: &mut Writer<impl Write>, debug: bool) {
+    match ipc::show_modal("message", state, debug) {
         Ok(resp) => match resp.kind.as_str() {
             "ok" => {
                 let _ = writer.ok("");
@@ -170,6 +177,28 @@ fn handle_get_info(cmd: &Command, writer: &mut Writer<impl Write>) {
     }
 }
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn print_version() {
+    println!("pinentry-dms {VERSION}");
+}
+
+fn print_help() {
+    eprintln!("pinentry-dms {VERSION} — DankMaterialShell pinentry for gopass + age");
+    eprintln!();
+    eprintln!("Usage: pinentry-dms [OPTIONS]");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  -d, --debug              verbose IPC tracing on stderr");
+    eprintln!("  -o, --timeout SECS       default SETTIMEOUT value (seconds)");
+    eprintln!("  -V, --version            print version and exit");
+    eprintln!("  -h, --help               print this help and exit");
+    eprintln!();
+    eprintln!("Standard pinentry compatibility flags are accepted and ignored:");
+    eprintln!("  --display, --ttyname, --ttytype, --lc-ctype, --lc-messages,");
+    eprintln!("  --colors, --xauthority, --parent-wid, --no-global-grab.");
+}
+
 struct Args {
     debug: bool,
     timeout: i32,
@@ -184,6 +213,14 @@ fn parse_args() -> Args {
         let arg = &argv[i];
         match arg.as_str() {
             "--debug" | "-d" => debug = true,
+            "--version" | "-V" => {
+                print_version();
+                std::process::exit(0);
+            }
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
             "--timeout" | "-o" => {
                 i += 1;
                 if i < argv.len() {
