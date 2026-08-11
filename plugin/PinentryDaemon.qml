@@ -24,11 +24,6 @@ PluginComponent {
     // gopass processes prompt concurrently for the same passphrase, we show
     // ONE modal and broadcast the result to the active socket + all these.
     property var pendingGetpinSockets: []
-    // One-shot: trigger a gopass age agent unlock when DMS starts so the agent
-    // has identities before background callers (git credential helper, etc.)
-    // hit a locked agent and spawn a pinentry storm. Fires once per plugin
-    // load. Best-effort: if gopass isn't ready the call just fails silently.
-    property bool _preUnlockFired: false
 
     IpcHandler {
         target: "pinentryDms"
@@ -159,32 +154,6 @@ PluginComponent {
         if (pendingQueue.length > 0) {
             const next = pendingQueue.shift();
             showModal(next);
-        }
-    }
-
-    // F3: best-effort pre-unlock of the gopass age agent at plugin load. Fires
-    // a `gopass age agent unlock` once; if the agent is already unlocked with
-    // identities this is a no-op (gopass returns quickly), if it's locked the
-    // user gets a single predictable prompt at session start instead of a
-    // storm from background callers. Failure is non-fatal (gopass not on PATH
-    // yet, etc.) — the normal pinentry flow still works as a fallback.
-    function _preUnlockAgent() {
-        if (_preUnlockFired)
-            return
-        _preUnlockFired = true
-        const proc = preUnlockComponent.createObject(root)
-        proc.running = true
-    }
-
-    property Component preUnlockComponent: Component {
-        Process {
-            command: ["gopass", "age", "agent", "unlock"]
-            stdout: SplitParser { onRead: line => {} }
-            stderr: SplitParser { onRead: line => {} }
-            onExited: (exitCode) => {
-                console.info("PinentryDms: pre-unlock exit " + exitCode)
-                destroy()
-            }
         }
     }
 
@@ -680,11 +649,6 @@ PluginComponent {
 
     Component.onCompleted: {
         console.info("PinentryDms: daemon started");
-        // F3: pre-unlock the gopass age agent once at session start so the
-        // agent has identities before background callers (git credential
-        // helper, chezmoi apply, IDE git fetch) hit a locked agent and spawn
-        // a pinentry storm. Best-effort; the normal prompt flow still works.
-        Qt.callLater(_preUnlockAgent);
     }
 
     Component.onDestruction: {

@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-08-11
+
+### Removed
+- Pre-unlock of the gopass age agent at DMS session start (F3). On gopass
+  1.16.1, `gopass age agent unlock` only flips the locked flag without
+  loading identities (the v1.16.1 `unlock` subcommand does not call
+  `SendIdentities`), which puts the agent in a half-unlocked zombie state
+  (locked=false, identities=nil) where every subsequent `gopass show`
+  re-prompts forever. The first natural `gopass show` after boot loads
+  identities via the `decryptWithAgent` path ("agent is locked"), so the
+  pre-unlock was both unnecessary and harmful on this gopass version.
+
 ## [1.2.1] - 2026-08-11
 
 ### Fixed
