@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-08-12
+
+### Fixed
+- IPC response deadline now strictly exceeds the modal's own timeout in all
+  cases. Previously, without `SETTIMEOUT` (gopass does not send one), both the
+  QML modal timer and the IPC deadline defaulted to exactly 60s, so when the
+  modal timed out its "timeout" response lost the race against the IPC
+  deadline: the pinentry client received a generic "DMS plugin never
+  connected" error instead of the canonical Assuan `Timeout`. The deadline is
+  now modal timeout + 10s buffer whether `SETTIMEOUT` is set or not.
+
 ## [1.2.2] - 2026-08-11
 
 ### Removed

@@ -131,14 +131,20 @@ pub fn zeroize_string(s: &mut String) {
 /// response. The plugin only connects its socket AFTER the user has typed
 /// (it connects in `sendResponse`, right before writing the JSON), so this
 /// deadline must cover the user's typing time, not just the IPC roundtrip.
-/// When `SETTIMEOUT` is set it's that plus a buffer; otherwise 60s.
+/// It must also STRICTLY exceed the modal's own timeout (`SETTIMEOUT` or the
+/// 60s QML default): when the modal times out, the plugin connects to report
+/// "timeout" — if both sides used the same 60s, that response would lose the
+/// race and the client would get a generic "DMS plugin never connected"
+/// instead of the canonical Timeout error.
 fn dialog_deadline(state: &crate::assuan::State) -> Duration {
     const BUFFER: Duration = Duration::from_secs(10);
-    if state.timeout > 0 {
-        Duration::from_secs(state.timeout as u64).saturating_add(BUFFER)
-    } else {
-        Duration::from_secs(60)
-    }
+    // Must mirror the QML modal's fallback `Timer` interval (60s).
+    const MODAL_DEFAULT: Duration = Duration::from_secs(60);
+    let modal = match state.timeout {
+        t if t > 0 => Duration::from_secs(t as u64),
+        _ => MODAL_DEFAULT,
+    };
+    modal.saturating_add(BUFFER)
 }
 
 /// Show the modal by signaling the DMS plugin and awaiting its reply over the
@@ -414,9 +420,11 @@ mod tests {
     }
 
     #[test]
-    fn dialog_deadline_defaults_to_60s_when_no_timeout() {
+    fn dialog_deadline_exceeds_modal_default_when_no_timeout() {
+        // No SETTIMEOUT: modal defaults to 60s, IPC deadline must be 60s+buffer
+        // so the plugin's "timeout" response wins the race.
         let state = crate::assuan::State::default();
-        assert_eq!(dialog_deadline(&state), Duration::from_secs(60));
+        assert_eq!(dialog_deadline(&state), Duration::from_secs(70));
     }
 
     #[test]

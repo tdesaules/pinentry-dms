@@ -2,7 +2,7 @@
     "id": "pinentryDms",
     "name": "Pinentry DMS",
     "description": "gopass/age passphrase entry with a native DMS modal (pinentry-dms binary)",
-    "version": "1.2.2",
+    "version": "1.2.3",
     "author": "tdesaules",
     "type": "daemon",
     "capabilities": ["authentication", "ipc", "daemon"],
